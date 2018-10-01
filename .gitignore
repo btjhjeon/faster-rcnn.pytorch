@@ -8,6 +8,9 @@ data/*
 # aten/build/ will stop being cleaned.  So be careful when
 # refactoring this file!
 
+# sublime config
+sftp-config.json
+
 ## PyTorch
 
 .mypy_cache
