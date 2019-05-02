@@ -61,7 +61,7 @@ def parse_args():
                       help='directory to save models', default="models",
                       type=str)
   parser.add_argument('--nw', dest='num_workers',
-                      help='number of worker to load data',
+                      help='number of workers to load data',
                       default=0, type=int)
   parser.add_argument('--cuda', dest='cuda',
                       help='whether use CUDA',
@@ -76,7 +76,7 @@ def parse_args():
                       help='batch_size',
                       default=1, type=int)
   parser.add_argument('--cag', dest='class_agnostic',
-                      help='whether perform class_agnostic bbox regression',
+                      help='whether to perform class_agnostic bbox regression',
                       action='store_true')
 
 # config optimization
@@ -111,7 +111,7 @@ def parse_args():
   parser.add_argument('--checkpoint', dest='checkpoint',
                       help='checkpoint to load model',
                       default=0, type=int)
-# log and diaplay
+# log and display
   parser.add_argument('--use_tfb', dest='use_tfboard',
                       help='whether use tensorboard',
                       action='store_true')
@@ -273,6 +273,9 @@ if __name__ == '__main__':
   elif args.optimizer == "sgd":
     optimizer = torch.optim.SGD(params, momentum=cfg.TRAIN.MOMENTUM)
 
+  if args.cuda:
+    fasterRCNN.cuda()
+
   if args.resume:
     load_name = os.path.join(output_dir,
       'faster_rcnn_{}_{}_{}.pth'.format(args.checksession, args.checkepoch, args.checkpoint))
@@ -289,9 +292,6 @@ if __name__ == '__main__':
 
   if args.mGPUs:
     fasterRCNN = nn.DataParallel(fasterRCNN)
-
-  if args.cuda:
-    fasterRCNN.cuda()
 
   iters_per_epoch = int(train_size / args.batch_size)
 
