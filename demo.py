@@ -138,6 +138,41 @@ def _get_image_blob(im):
 
   return blob, np.array(im_scale_factors)
 
+
+def adjust_bbox(boxes, bbox_pred, im_info, im_scales, n_bbox, n_classes, args, cfg):
+  if cfg.TEST.BBOX_REG:
+    # Apply bounding-box regression deltas
+    box_deltas = bbox_pred.data
+    if cfg.TRAIN.BBOX_NORMALIZE_TARGETS_PRECOMPUTED:
+      # Optionally normalize targets by a precomputed mean and stdev
+      if args.class_agnostic:
+        if args.cuda > 0:
+          box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS).cuda() \
+                       + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS).cuda()
+        else:
+          box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS) \
+                       + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS)
+
+        box_deltas = box_deltas.view(1, -1, 4)
+      else:
+        if args.cuda > 0:
+          box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS).cuda() \
+                       + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS).cuda()
+        else:
+          box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS) \
+                       + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS)
+        box_deltas = box_deltas.view(1, -1, 4 * n_classes)
+
+    pred_boxes = bbox_transform_inv(boxes, box_deltas, 1)
+    pred_boxes = clip_boxes(pred_boxes, im_info.data, 1)
+  else:
+    # Simply repeat the boxes, once for each class
+    pred_boxes = np.tile(boxes, (1, n_bbox))
+
+  pred_boxes /= im_scales[0]
+  return pred_boxes
+
+
 if __name__ == '__main__':
 
   args = parse_args()
@@ -293,37 +328,8 @@ if __name__ == '__main__':
 
       scores = cls_prob.data
       boxes = rois.data[:, :, 1:5]
-
-      if cfg.TEST.BBOX_REG:
-          # Apply bounding-box regression deltas
-          box_deltas = bbox_pred.data
-          if cfg.TRAIN.BBOX_NORMALIZE_TARGETS_PRECOMPUTED:
-          # Optionally normalize targets by a precomputed mean and stdev
-            if args.class_agnostic:
-                if args.cuda > 0:
-                    box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS).cuda() \
-                               + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS).cuda()
-                else:
-                    box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS) \
-                               + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS)
-
-                box_deltas = box_deltas.view(1, -1, 4)
-            else:
-                if args.cuda > 0:
-                    box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS).cuda() \
-                               + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS).cuda()
-                else:
-                    box_deltas = box_deltas.view(-1, 4) * torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_STDS) \
-                               + torch.FloatTensor(cfg.TRAIN.BBOX_NORMALIZE_MEANS)
-                box_deltas = box_deltas.view(1, -1, 4 * len(pascal_classes))
-
-          pred_boxes = bbox_transform_inv(boxes, box_deltas, 1)
-          pred_boxes = clip_boxes(pred_boxes, im_info.data, 1)
-      else:
-          # Simply repeat the boxes, once for each class
-          pred_boxes = np.tile(boxes, (1, scores.shape[1]))
-
-      pred_boxes /= im_scales[0]
+      pred_boxes = adjust_bbox(boxes, bbox_pred, im_info, im_scales,
+                               scores.shape[1], len(pascal_classes), args, cfg)
 
       scores = scores.squeeze()
       pred_boxes = pred_boxes.squeeze()
