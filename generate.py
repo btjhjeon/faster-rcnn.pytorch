@@ -419,16 +419,16 @@ if __name__ == '__main__':
         elif len(keep_boxes) > MAX_BOXES:
             keep_boxes = torch.argsort(max_conf, 0, True)[:MAX_BOXES]
 
-        num_boxes = len(keep_boxes)
+        num_box = len(keep_boxes)
         image_h = im_in.shape[0]
         image_w = im_in.shape[1]
         bboxes = bboxes[keep_boxes]
         features = feat[keep_boxes]
         spatials = get_spatial(bboxes, image_w, image_h)
 
-        split_features[i, :num_boxes].copy_(features)
-        split_bboxes[i, :num_boxes].copy_(bboxes)
-        split_spatials[i, :num_boxes].copy_(spatials)
+        split_features[i, :num_box].copy_(features)
+        split_bboxes[i, :num_box].copy_(bboxes)
+        split_spatials[i, :num_box].copy_(spatials)
 
         misc_toc = time.time()
         nms_time = misc_toc - misc_tic
