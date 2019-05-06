@@ -4,31 +4,29 @@
 # Written by Jiasen Lu, Jianwei Yang, based on code from Ross Girshick
 # --------------------------------------------------------
 
-import os
+import os, sys
 import numpy as np
 import argparse
 import pprint
 import time
-import cv2
 import csv
+csv.field_size_limit(sys.maxsize)
 import json
+import base64
 import _pickle as cPickle
 import torch
-import torch.nn as nn
 import pdb
 
 from scipy.misc import imread
 from roi_data_layer.roidb import combined_roidb
 from model.utils.config import cfg, cfg_from_file, cfg_from_list, get_output_dir
-from model.rpn.bbox_transform import clip_boxes
 from model.roi_layers import nms
-from model.rpn.bbox_transform import bbox_transform_inv
-from model.utils.blob import im_list_to_blob
 from model.faster_rcnn.vgg16 import vgg16
 from model.faster_rcnn.resnet import resnet
 import demo
 
 
+FIELDNAMES = ['image_id', 'image_w','image_h','num_boxes', 'boxes', 'features']
 MIN_BOXES = 10
 MAX_BOXES = 100
 
@@ -79,7 +77,7 @@ def parse_args():
                         default=9771, type=int)
     parser.add_argument('--out', dest='outfile',
                         help='output file name',
-                        default='coco_train_faster-rcnn_res101_ls', type=str)
+                        default='coco_train_faster-rcnn_res101_ls.tsv', type=str)
 
     args = parser.parse_args()
     return args
@@ -259,6 +257,91 @@ def get_spatial(bboxes, w, h):
     return scaled_spatials
 
 
+def create_input_holders(args):
+
+    # initilize the tensor holder here.
+    im_data = torch.FloatTensor(1)
+    im_info = torch.FloatTensor(1)
+    gt_boxes = torch.FloatTensor(1)
+    num_boxes = torch.LongTensor(1)
+
+    # ship to cuda
+    if args.cuda:
+        im_data = im_data.cuda()
+        im_info = im_info.cuda()
+        gt_boxes = gt_boxes.cuda()
+        num_boxes = num_boxes.cuda()
+    return im_data, im_info, gt_boxes, num_boxes
+
+
+def get_detections_from_im(net, im_file, image_id, input_holders, thresh=0.2):
+    # im = cv2.imread(im_file)
+    im_in = np.array(imread(im_file))
+
+    if len(im_in.shape) == 2:
+        im_in = im_in[:, :, np.newaxis]
+        im_in = np.concatenate((im_in, im_in, im_in), axis=2)
+    # rgb -> bgr
+    im = im_in[:, :, ::-1]
+
+    blobs, im_scales = demo._get_image_blob(im)
+    assert len(im_scales) == 1, "Only single-image batch implemented"
+    im_blob = blobs
+    im_info_np = np.array([[im_blob.shape[1], im_blob.shape[2], im_scales[0]]], dtype=np.float32)
+
+    im_data_pt = torch.from_numpy(im_blob)
+    im_data_pt = im_data_pt.permute(0, 3, 1, 2)
+    im_info_pt = torch.from_numpy(im_info_np)
+
+    input_holders[0].data.resize_(im_data_pt.size()).copy_(im_data_pt)
+    input_holders[1].data.resize_(im_info_pt.size()).copy_(im_info_pt)
+    input_holders[2].data.resize_(1, 1, 5).zero_()
+    input_holders[3].data.resize_(1).zero_()
+
+    # pdb.set_trace()
+    det_tic = time.time()
+
+    rois, cls_prob, bbox_pred, rpn_loss_cls, rpn_loss_box, \
+        RCNN_loss_cls, RCNN_loss_bbox, rois_label, feat = net(*input_holders)
+
+    scores = cls_prob.data
+    boxes = rois.data[:, :, 1:5]
+    pred_boxes = demo.adjust_bbox(boxes, bbox_pred, input_holders[1], im_scales,
+                                  scores.shape[1], num_classes, args, cfg)
+
+    scores = scores.squeeze()
+    pred_boxes = pred_boxes.squeeze()
+    det_toc = time.time()
+    detect_time = det_toc - det_tic
+    misc_tic = time.time()
+
+    max_conf = torch.zeros(scores.shape[0])
+    bboxes = torch.zeros((scores.shape[0], 4))
+    for j in range(1, num_classes):
+        cls_scores = scores[:, j].cpu()
+        cls_boxes = pred_boxes.cpu() if args.class_agnostic else pred_boxes[:, j * 4:(j + 1) * 4].cpu()
+        keep = nms(cls_boxes, cls_scores, cfg.TEST.NMS)
+        bboxes[keep] = torch.where(cls_scores[keep].unsqueeze(1).repeat(1, 4) \
+                                   > max_conf[keep].unsqueeze(1).repeat(1, 4), \
+                                   cls_boxes[keep], bboxes[keep])
+        max_conf[keep] = torch.where(cls_scores[keep] > max_conf[keep], cls_scores[keep], max_conf[keep])
+
+    keep_boxes = torch.nonzero(max_conf >= thresh).squeeze(1)
+    if len(keep_boxes) < MIN_BOXES:
+        keep_boxes = torch.argsort(max_conf, 0, True)[:MIN_BOXES]
+    elif len(keep_boxes) > MAX_BOXES:
+        keep_boxes = torch.argsort(max_conf, 0, True)[:MAX_BOXES]
+
+    return {
+        'image_id': image_id,
+        'image_h': np.size(im, 0),
+        'image_w': np.size(im, 1),
+        'num_boxes' : len(keep_boxes),
+        'boxes': base64.b64encode(bboxes[keep_boxes].numpy()).decode('utf'),
+        'features': base64.b64encode(feat[keep_boxes].cpu().detach().numpy()).decode('utf')
+    }
+
+
 if __name__ == '__main__':
 
     args = parse_args()
@@ -341,20 +424,11 @@ if __name__ == '__main__':
     print('load model successfully!')
     print("load checkpoint %s" % (load_name))
 
-    # initilize the tensor holder here.
-    im_data = torch.FloatTensor(1)
-    im_info = torch.FloatTensor(1)
-    num_boxes = torch.LongTensor(1)
-    gt_boxes = torch.FloatTensor(1)
+    input_holders = create_input_holders(args)
 
     cfg.CUDA = args.cuda
     # ship to cuda
     if args.cuda:
-        im_data = im_data.cuda()
-        im_info = im_info.cuda()
-        num_boxes = num_boxes.cuda()
-        gt_boxes = gt_boxes.cuda()
-
         fasterRCNN.cuda()
     fasterRCNN.eval()
 
@@ -367,103 +441,28 @@ if __name__ == '__main__':
     num_classes = len(imdb.classes)
 
     print('Loaded Photo: {} images.'.format(num_images))
-
-    split_features = torch.zeros([num_images, MAX_BOXES, 2048], dtype=torch.float32)
-    split_bboxes = torch.zeros([num_images, MAX_BOXES, 4], dtype=torch.float32)
-    split_spatials = torch.zeros([num_images, MAX_BOXES, 6], dtype=torch.float32)
     imgid2idx = {}
-    for i, (im_file, image_id) in enumerate(imglist):
-        total_tic = time.time()
+    with open(args.outfile, 'w') as tsvfile:
+        writer = csv.DictWriter(tsvfile, delimiter='\t', fieldnames=FIELDNAMES)
+        for i, (im_file, image_id) in enumerate(imglist):
+            misc_tic = time.time()
 
-        imgid2idx[image_id] = i
+            imgid2idx[image_id] = i
 
-        # im = cv2.imread(im_file)
-        im_in = np.array(imread(im_file))
+            result = get_detections_from_im(fasterRCNN, im_file, image_id, input_holders, thresh)
+            writer.writerow(result)
 
-        if len(im_in.shape) == 2:
-            im_in = im_in[:, :, np.newaxis]
-            im_in = np.concatenate((im_in, im_in, im_in), axis=2)
-        # rgb -> bgr
-        im = im_in[:, :, ::-1]
+            misc_toc = time.time()
+            nms_time = misc_toc - misc_tic
 
-        blobs, im_scales = demo._get_image_blob(im)
-        assert len(im_scales) == 1, "Only single-image batch implemented"
-        im_blob = blobs
-        im_info_np = np.array([[im_blob.shape[1], im_blob.shape[2], im_scales[0]]], dtype=np.float32)
+            if (i % 100) == 0:
+                print('{:d}/{:d} {:.3f}s (projected finish: {:.2f} hours)' \
+                    .format(i + 1, len(imglist), nms_time,\
+                            nms_time * (len(imglist) - i) / 3600))
 
-        im_data_pt = torch.from_numpy(im_blob)
-        im_data_pt = im_data_pt.permute(0, 3, 1, 2)
-        im_info_pt = torch.from_numpy(im_info_np)
-
-        im_data.data.resize_(im_data_pt.size()).copy_(im_data_pt)
-        im_info.data.resize_(im_info_pt.size()).copy_(im_info_pt)
-        gt_boxes.data.resize_(1, 1, 5).zero_()
-        num_boxes.data.resize_(1).zero_()
-
-        # pdb.set_trace()
-        det_tic = time.time()
-
-        rois, cls_prob, bbox_pred, \
-        rpn_loss_cls, rpn_loss_box, \
-        RCNN_loss_cls, RCNN_loss_bbox, \
-        rois_label, feat = fasterRCNN(im_data, im_info, gt_boxes, num_boxes)
-
-        scores = cls_prob.data
-        boxes = rois.data[:, :, 1:5]
-        pred_boxes = demo.adjust_bbox(boxes, bbox_pred, im_info, im_scales,
-                                      scores.shape[1], num_classes, args, cfg)
-
-        scores = scores.squeeze()
-        pred_boxes = pred_boxes.squeeze()
-        det_toc = time.time()
-        detect_time = det_toc - det_tic
-        misc_tic = time.time()
-
-        max_conf = torch.zeros(scores.shape[0])
-        bboxes = torch.zeros((scores.shape[0], 4))
-        for j in range(1, num_classes):
-            cls_scores = scores[:, j].cpu()
-            cls_boxes = pred_boxes.cpu() if args.class_agnostic else pred_boxes[:, j * 4:(j + 1) * 4].cpu()
-            keep = nms(cls_boxes, cls_scores, cfg.TEST.NMS)
-            bboxes[keep] = torch.where(cls_scores[keep].unsqueeze(1).repeat(1, 4)\
-                                       > max_conf[keep].unsqueeze(1).repeat(1, 4),\
-                                       cls_boxes[keep], bboxes[keep])
-            max_conf[keep] = torch.where(cls_scores[keep] > max_conf[keep], cls_scores[keep], max_conf[keep])
-
-        keep_boxes = torch.nonzero(max_conf >= thresh).squeeze(1)
-        if len(keep_boxes) < MIN_BOXES:
-            keep_boxes = torch.argsort(max_conf, 0, True)[:MIN_BOXES]
-        elif len(keep_boxes) > MAX_BOXES:
-            keep_boxes = torch.argsort(max_conf, 0, True)[:MAX_BOXES]
-
-        num_box = len(keep_boxes)
-        image_h = im_in.shape[0]
-        image_w = im_in.shape[1]
-        bboxes = bboxes[keep_boxes]
-        features = feat[keep_boxes].cpu()
-        spatials = get_spatial(bboxes, image_w, image_h)
-
-        split_features[i, :num_box].copy_(features)
-        split_bboxes[i, :num_box].copy_(bboxes)
-        split_spatials[i, :num_box].copy_(spatials)
-
-        misc_toc = time.time()
-        nms_time = misc_toc - misc_tic
-
-    assert (0. == split_features.abs().sum(dim=(2, 1))).sum() == 0
-    assert (0. == split_bboxes.sum(dim=(2, 1))).sum() == 0
-    assert (0. == split_spatials.sum(dim=(2, 1))).sum() == 0
-
-    # Save features
+# Save features
     img_id2idx_path = '{}_imgid2idx.pkl'.format(args.outfile)
     with open(img_id2idx_path, 'wb') as f:
         cPickle.dump(imgid2idx, f)
 
-    features_cache = '{}_features.pth'.format(args.outfile)
-    bboxes_cache = '{}_bboxes.pth'.format(args.outfile)
-    spatials_cache = '{}_spatials.pth'.format(args.outfile)
-
-    torch.save(split_features, features_cache)
-    torch.save(split_bboxes, bboxes_cache)
-    torch.save(split_spatials, spatials_cache)
     print('Done!')
