@@ -14,6 +14,7 @@ import csv
 import json
 import _pickle as cPickle
 import torch
+import torch.nn as nn
 import pdb
 
 from scipy.misc import imread
@@ -75,7 +76,7 @@ def parse_args():
                         default=10, type=int)
     parser.add_argument('--checkpoint', dest='checkpoint',
                         help='checkpoint to load network',
-                        default=14657, type=int)
+                        default=9771, type=int)
     parser.add_argument('--out', dest='outfile',
                         help='output file name',
                         default='coco_train_faster-rcnn_res101_ls', type=str)
@@ -176,6 +177,22 @@ def load_image_ids(split_name):
         file_list = os.listdir(image_dir)
         image_list = [file.split('.')[0] for file in file_list]
         path_list = [os.path.join(image_dir, file_name) for file_name in file_list]
+        split = list(zip(path_list, image_list))
+    elif split_name == 'referring_train':
+        data_dir = './data/ReferringRelationships/'
+        image_dirs = [os.path.join(data_dir, image_dir) for image_dir in ['VG_100K', 'VG_100K_2']]
+        image_files = list(json.load(open(os.path.join(data_dir, 'train_image_metadata.json'))).keys())
+        image_list = [int(file.split('.')[0]) for file in image_files]
+        path_list = [os.path.join(image_dirs[0], file_name) if os.path.isfile(os.path.join(image_dirs[0], file_name))\
+                     else os.path.join(image_dirs[1], file_name) for file_name in image_files]
+        split = list(zip(path_list, image_list))
+    elif split_name == 'referring_test':
+        data_dir = './data/ReferringRelationships/'
+        image_dirs = [os.path.join(data_dir, image_dir) for image_dir in ['VG_100K', 'VG_100K_2']]
+        image_files = list(json.load(open(os.path.join(data_dir, 'test_image_metadata.json'))).keys())
+        image_list = [int(file.split('.')[0]) for file in image_files]
+        path_list = [os.path.join(image_dirs[0], file_name) if os.path.isfile(os.path.join(image_dirs[0], file_name)) \
+                         else os.path.join(image_dirs[1], file_name) for file_name in image_files]
         split = list(zip(path_list, image_list))
     elif split_name == 'tdiuc_train':
         image_dir = './data/TDIUC/Images/train2014/'
@@ -402,11 +419,11 @@ if __name__ == '__main__':
         detect_time = det_toc - det_tic
         misc_tic = time.time()
 
-        max_conf = torch.zeros(scores.shape[0]).cuda()
-        bboxes = torch.zeros((scores.shape[0], 4)).cuda()
+        max_conf = torch.zeros(scores.shape[0])
+        bboxes = torch.zeros((scores.shape[0], 4))
         for j in range(1, num_classes):
-            cls_scores = scores[:, j]
-            cls_boxes = pred_boxes if args.class_agnostic else pred_boxes[:, j * 4:(j + 1) * 4]
+            cls_scores = scores[:, j].cpu()
+            cls_boxes = pred_boxes.cpu() if args.class_agnostic else pred_boxes[:, j * 4:(j + 1) * 4].cpu()
             keep = nms(cls_boxes, cls_scores, cfg.TEST.NMS)
             bboxes[keep] = torch.where(cls_scores[keep].unsqueeze(1).repeat(1, 4)\
                                        > max_conf[keep].unsqueeze(1).repeat(1, 4),\
@@ -423,7 +440,7 @@ if __name__ == '__main__':
         image_h = im_in.shape[0]
         image_w = im_in.shape[1]
         bboxes = bboxes[keep_boxes]
-        features = feat[keep_boxes]
+        features = feat[keep_boxes].cpu()
         spatials = get_spatial(bboxes, image_w, image_h)
 
         split_features[i, :num_box].copy_(features)
